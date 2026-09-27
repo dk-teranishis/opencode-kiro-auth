@@ -476,4 +476,21 @@ describe('CodeWhisperer tool compatibility', () => {
       }
     })
   })
+
+  test('ends SDK streaming responses with the OpenAI completion sentinel', async () => {
+    const response = await new ResponseHandler().handleSdkSuccess(
+      {
+        generateAssistantResponseResponse: (async function* () {
+          yield { assistantResponseEvent: { content: 'Answer.' } }
+        })()
+      },
+      MODEL,
+      'conversation-1',
+      true
+    )
+
+    const body = await response.text()
+    expect(body).toContain('"finish_reason":"stop"')
+    expect(body).toEndWith('data: [DONE]\n\n')
+  })
 })

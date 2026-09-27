@@ -32,7 +32,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "^2.0.79",
     "@aws/codewhisperer-streaming-client": "^1.0.34",
     "@opencode/plugin": "^2.0.18",
     "libsql": "^0.5.29",

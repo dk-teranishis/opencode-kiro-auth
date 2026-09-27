@@ -53,7 +53,17 @@ export class RequestHandler {
       return fetch(input, init)
     }
 
-    return this.enqueueKiroRequest(() => this.handleKiroRequest(url, init, showToast))
+    // V2 session hooks pass a Request rather than fetch's separate URL/init
+    // arguments. Materialize its body before handing it to the existing
+    // OpenAI-compatible request transformer.
+    const requestInit = init ?? (input instanceof Request ? { body: await input.text() } : undefined)
+    const body = requestInit?.body ? JSON.parse(requestInit.body) : {}
+
+    logger.log('Kiro request intercepted', {
+      streaming: Boolean(body.stream),
+      model: this.extractModel(url) || body.model
+    })
+    return this.enqueueKiroRequest(() => this.handleKiroRequest(url, requestInit, showToast))
   }
 
   private async enqueueKiroRequest<T>(run: () => Promise<T>): Promise<T> {
@@ -80,6 +90,7 @@ export class RequestHandler {
   ): Promise<Response> {
     const body = init?.body ? JSON.parse(init.body) : {}
     const model = this.extractModel(url) || body.model || 'claude-sonnet-4-5'
+    logger.log('Kiro SDK request starting', { model, streaming: Boolean(body.stream) })
     const think =
       model.endsWith('-thinking') || !!body.providerOptions?.thinkingConfig || !!body.thinkingConfig
     const budget =

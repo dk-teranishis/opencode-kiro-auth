@@ -3,6 +3,7 @@ import { parseEventStream } from '../../plugin/response'
 import { transformKiroStream } from '../../plugin/streaming/index.js'
 import { transformSdkStream } from '../../plugin/streaming/sdk-stream-transformer.js'
 import type { ToolNameMap } from '../../plugin/types.js'
+import * as logger from '../../plugin/logger.js'
 
 interface AccumulatedToolCall {
   toolUseId: string
@@ -43,16 +44,30 @@ export class ResponseHandler {
     conversationId: string,
     toolNameMap?: ToolNameMap
   ): Promise<Response> {
-    const s = transformKiroStream(response, model, conversationId, toolNameMap)
+    return this.createStreamingResponse(
+      transformKiroStream(response, model, conversationId, toolNameMap),
+      model,
+      'HTTP'
+    )
+  }
+
+  private createStreamingResponse(stream: AsyncIterable<any>, model: string, source: string): Response {
     return new Response(
       new ReadableStream({
         async start(c) {
           try {
-            for await (const e of s) {
+            let chunks = 0
+            let finished = false
+            for await (const e of stream) {
+              chunks++
+              finished ||= Boolean(e.choices?.[0]?.finish_reason)
               c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`))
             }
+            logger.log(`Kiro ${source} stream completed`, { model, chunks, finished })
+            c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
             c.close()
           } catch (err) {
+            logger.error(`Kiro ${source} stream failed`, err instanceof Error ? err : new Error(String(err)))
             c.error(err)
           }
         }
@@ -67,21 +82,10 @@ export class ResponseHandler {
     conversationId: string,
     toolNameMap?: ToolNameMap
   ): Promise<Response> {
-    const s = transformSdkStream(sdkResponse, model, conversationId, toolNameMap)
-    return new Response(
-      new ReadableStream({
-        async start(c) {
-          try {
-            for await (const e of s) {
-              c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`))
-            }
-            c.close()
-          } catch (err) {
-            c.error(err)
-          }
-        }
-      }),
-      { headers: { 'Content-Type': 'text/event-stream' } }
+    return this.createStreamingResponse(
+      transformSdkStream(sdkResponse, model, conversationId, toolNameMap),
+      model,
+      'SDK'
     )
   }
 

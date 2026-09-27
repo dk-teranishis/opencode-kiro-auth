@@ -1,4 +1,3 @@
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { Model, Plugin, Provider } from '@opencode/plugin'
 import { KIRO_CONSTANTS } from './constants.js'
 import { AuthHandler } from './core/auth/auth-handler.js'
@@ -55,9 +54,9 @@ function buildModels(providerID: ReturnType<typeof Provider.ID.make>) {
       name: model.name,
       capabilities: { tools: true, input: model.modalities?.input ?? ['text'], output: ['text'] },
       variants,
-      ...(model.reasoning
-        ? { compatibility: { reasoningField: model.interleaved?.field ?? 'reasoning_content' } }
-        : {})
+      compatibility: model.reasoning
+        ? { reasoningField: model.interleaved?.field ?? 'reasoning_content' }
+        : undefined
     }
   })
 }
@@ -103,18 +102,11 @@ export const KiroOAuthPlugin = Plugin.define({
       for (const method of authHandler.getIntegrationMethods()) editor.method.update(method as any)
     })
 
-    await ctx.aisdk.hook(
-      'language',
-      (event) => {
-        const kiro = createOpenAICompatible({
-          name: KIRO_PROVIDER_ID,
-          baseURL,
-          apiKey: '',
-          includeUsage: true,
-          fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
-            requestHandler.handle(input, init, showToast)) as typeof fetch
-        })
-        event.language = kiro.languageModel(event.model.modelID)
+    await ctx.session.hook(
+      'http.response',
+      async (event) => {
+        logger.log('Kiro native HTTP response intercepted', { kind: event.kind })
+        event.response = await requestHandler.handle(event.request.clone(), undefined, showToast)
       },
       { providerID: KIRO_PROVIDER_ID }
     )
