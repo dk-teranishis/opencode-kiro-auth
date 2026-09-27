@@ -2,6 +2,7 @@ import { GenerateAssistantResponseCommand } from '@aws/codewhisperer-streaming-c
 import type { AccountRepository } from '../../infrastructure/database/account-repository'
 import type { AccountManager } from '../../plugin/accounts'
 import type { KiroConfig } from '../../plugin/config'
+import { buildEffortRequestFields } from '../../plugin/effort'
 import { isPermanentError } from '../../plugin/health'
 import * as logger from '../../plugin/logger'
 import { transformToSdkRequest } from '../../plugin/request'
@@ -35,7 +36,7 @@ export class RequestHandler {
     private accountManager: AccountManager,
     private config: KiroConfig,
     private repository: AccountRepository,
-    private client?: any
+    private reauthenticate?: () => Promise<boolean>
   ) {
     this.accountSelector = new AccountSelector(accountManager, config, syncFromKiroCli, repository)
     this.tokenRefresher = new TokenRefresher(config, accountManager, syncFromKiroCli, repository)
@@ -139,7 +140,12 @@ export class RequestHandler {
         this.logSdkRequest(sdkPrep, acc, apiTimestamp)
       }
       try {
-        const client = createSdkClient(auth, sdkPrep.region, sdkPrep.effort)
+        const client = createSdkClient(
+          auth,
+          sdkPrep.region,
+          sdkPrep.effort,
+          sdkPrep.effortSchemaPath
+        )
         const command = new GenerateAssistantResponseCommand({
           conversationState: sdkPrep.conversationState as any,
           profileArn: sdkPrep.profileArn
@@ -278,9 +284,10 @@ export class RequestHandler {
 
   private logSdkRequest(prep: SdkPreparedRequest, acc: ManagedAccount, timestamp: string): void {
     // Mirrors what the sdk-client middleware injects, so logs reflect the wire body.
-    const additionalModelRequestFields = prep.effort
-      ? { output_config: { effort: prep.effort } }
-      : undefined
+    const additionalModelRequestFields =
+      prep.effort && prep.effortSchemaPath
+        ? buildEffortRequestFields(prep.effort, prep.effortSchemaPath)
+        : undefined
 
     logger.logApiRequest(
       {
@@ -353,7 +360,7 @@ export class RequestHandler {
   }
 
   private async triggerReauth(showToast: ToastFunction): Promise<boolean> {
-    if (!this.client) return false
+    if (!this.reauthenticate) return false
 
     const cooldownRemaining = REAUTH_FAILURE_COOLDOWN_MS - (Date.now() - this.lastFailedReauthAt)
     if (cooldownRemaining > 0) {
@@ -377,17 +384,12 @@ export class RequestHandler {
   }
 
   private async performReauth(showToast: ToastFunction): Promise<boolean> {
+    const reauthenticate = this.reauthenticate
+    if (!reauthenticate) return false
+
     try {
       showToast('Session expired. Re-authenticating...', 'warning')
-      await this.client.provider.oauth.authorize({
-        path: { id: 'kiro' },
-        body: { method: 0 }
-      })
-
-      await this.client.provider.oauth.callback({
-        path: { id: 'kiro' },
-        body: { method: 0 }
-      })
+      if (!(await reauthenticate())) return false
 
       this.repository.invalidateCache()
       const accounts = await this.repository.findAll()

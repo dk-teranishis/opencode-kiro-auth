@@ -1,14 +1,16 @@
-import { tool } from '@opencode-ai/plugin'
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
+import { Model, Plugin, Provider } from '@opencode/plugin'
 import { KIRO_CONSTANTS } from './constants.js'
 import { AuthHandler } from './core/auth/auth-handler.js'
+import { IdcAuthMethod } from './core/auth/idc-auth-method.js'
 import { RequestHandler } from './core/request/request-handler.js'
 import { AccountCache } from './infrastructure/database/account-cache.js'
 import { AccountRepository } from './infrastructure/database/account-repository.js'
 import { AccountManager } from './plugin/accounts.js'
-import { bootstrapAuthIfNeeded } from './plugin/auth-bootstrap.js'
 import { loadConfig } from './plugin/config/index.js'
 import { buildModelRegistry } from './plugin/model-registry.js'
 import { formatWebSearchResults, kiroWebSearch } from './plugin/web-search.js'
+import * as logger from './plugin/logger.js'
 
 type ToastFunction = (message: string, variant: string) => void
 
@@ -41,117 +43,105 @@ const WEB_SEARCH_DESCRIPTION = `Search the web using Kiro's built-in search engi
 - ALWAYS cite sources with inline links in the format [description](url).
 - Paraphrase and summarize; do not reproduce more than ~30 consecutive words verbatim from any single source. Preserve factual accuracy while condensing.`
 
-function buildTools(config: any, accountManager: AccountManager): Record<string, any> {
-  if (!config.web_search_enabled) return {}
-  const account = accountManager.getCurrentOrNext()
-  if (!account?.profileArn) return {}
-
-  return {
-    kiro_web_search: tool({
-      description: WEB_SEARCH_DESCRIPTION,
-      args: {
-        query: tool.schema.string().describe('The search query. Must be 200 characters or fewer.')
-      },
-      async execute(args: { query: string }) {
-        try {
-          const results = await kiroWebSearch(accountManager, args.query)
-          return formatWebSearchResults(results)
-        } catch (e) {
-          return `Web search failed: ${e instanceof Error ? e.message : String(e)}`
-        }
-      }
-    })
-  }
+function buildModels(providerID: ReturnType<typeof Provider.ID.make>) {
+  return Object.entries(buildModelRegistry()).map(([modelID, legacy]) => {
+    const model = legacy as any
+    const variants = Object.entries(model.variants ?? {}).map(([id, settings]) => ({
+      id: Model.VariantID.make(id),
+      settings: settings as Record<string, unknown>
+    }))
+    return {
+      ...Model.Info.default(providerID, Model.ID.make(modelID)),
+      name: model.name,
+      capabilities: { tools: true, input: model.modalities?.input ?? ['text'], output: ['text'] },
+      variants,
+      ...(model.reasoning
+        ? { compatibility: { reasoningField: model.interleaved?.field ?? 'reasoning_content' } }
+        : {})
+    }
+  })
 }
 
-export const createKiroPlugin =
-  (id: string) =>
-  async ({ client, directory }: any) => {
-    const config = loadConfig(directory)
-
-    const showToast: ToastFunction = (message: string, variant: string) => {
-      client.tui.showToast({ body: { message, variant } }).catch(() => {})
-    }
-
-    const cache = new AccountCache(60000)
-    const repository = new AccountRepository(cache)
-
-    const authHandler = new AuthHandler(config, repository)
+export const KiroOAuthPlugin = Plugin.define({
+  id: KIRO_PROVIDER_ID,
+  async setup(ctx) {
+    const config = loadConfig(ctx.location.directory)
+    const showToast: ToastFunction = (message, variant) => logger.log(`Kiro ${variant}: ${message}`)
+    const repository = new AccountRepository(new AccountCache(60000))
     const accountManager = await AccountManager.loadFromDisk(config.account_selection_strategy)
+    const authHandler = new AuthHandler(config, repository)
     authHandler.setAccountManager(accountManager)
+    await authHandler.initialize(showToast as any)
 
-    const requestHandler = new RequestHandler(accountManager, config, repository, client)
-
-    // Compute the base URL once so both the config hook and auth loader use the same value
+    const idcMethod = new IdcAuthMethod(config, repository, accountManager)
+    const reauthenticate = async () => {
+      const authorization = await idcMethod.authorize()
+      await authorization.callback
+      return true
+    }
+    const requestHandler = new RequestHandler(accountManager, config, repository, reauthenticate)
     const baseURL = KIRO_CONSTANTS.BASE_URL.replace('/generateAssistantResponse', '').replace(
       '{{region}}',
       config.default_region || 'us-east-1'
     )
+    const providerID = Provider.ID.make(KIRO_PROVIDER_ID)
 
-    return {
-      config: async (input: any) => {
-        // Ensure there's an auth entry so OpenCode calls the loader on startup.
-        // This is a no-op if the entry already exists.
-        bootstrapAuthIfNeeded(id)
-
-        if (!input.provider) input.provider = {}
-        if (!input.provider[id]) input.provider[id] = {}
-        // Always set npm and api — these must be present regardless of whether
-        // the user has already defined the provider in their opencode.json.
-        input.provider[id].npm = '@ai-sdk/openai-compatible'
-        // Set the base URL at the provider level. OpenCode reads provider.api as
-        // model.api.url, which resolveSDK() uses to construct the endpoint URL.
-        // Only set if not already overridden by the user.
-        if (!input.provider[id].api) {
-          input.provider[id].api = baseURL
-        }
-        if (!input.provider[id].models) {
-          input.provider[id].models = buildModelRegistry()
-        }
-      },
-      auth: {
-        provider: id,
-        loader: async (getAuth: any) => {
-          await getAuth()
-          await authHandler.initialize(showToast as any)
-
-          return {
-            apiKey: '',
-            // Provide baseURL explicitly so the @ai-sdk/openai-compatible provider
-            // always has a valid URL. The custom fetch below intercepts all Kiro
-            // API calls, so this value is only used for URL construction.
-            baseURL,
-            fetch: (input: any, init?: any) => requestHandler.handle(input, init, showToast)
-          }
+    await ctx.provider.transform((editor) => {
+      editor.add({
+        info: {
+          ...Provider.Info.empty(providerID),
+          name: 'Kiro',
+          activation: 'enabled',
+          package: '@opencode/ai/providers/openai-compatible',
+          settings: { baseURL }
         },
-        methods: authHandler.getMethods()
-      },
-      provider: {
-        id,
-        models: async (provider: any) => {
-          const models = provider?.models || {}
-          const normalized: Record<string, any> = {}
+        models: buildModels(providerID)
+      })
+    })
 
-          for (const [modelID, model] of Object.entries(models)) {
-            const modelInfo = model as any
-            normalized[modelID] = {
-              ...modelInfo,
-              api: {
-                ...(modelInfo.api || {}),
-                npm: '@ai-sdk/openai-compatible',
-                // Ensure url is always set. modelInfo.api.url should already be
-                // populated from the config hook's provider.api field, but we
-                // set it explicitly as a fallback for any edge cases.
-                url: modelInfo.api?.url || baseURL
-              }
+    await ctx.integration.transform((editor) => {
+      for (const method of authHandler.getIntegrationMethods()) editor.method.update(method as any)
+    })
+
+    await ctx.aisdk.hook(
+      'language',
+      (event) => {
+        const kiro = createOpenAICompatible({
+          name: KIRO_PROVIDER_ID,
+          baseURL,
+          apiKey: '',
+          includeUsage: true,
+          fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
+            requestHandler.handle(input, init, showToast)) as typeof fetch
+        })
+        event.language = kiro.languageModel(event.model.modelID)
+      },
+      { providerID: KIRO_PROVIDER_ID }
+    )
+
+    if (config.web_search_enabled && accountManager.getCurrentOrNext()?.profileArn) {
+      await ctx.tool.transform((editor) => {
+        editor.add({
+          name: 'kiro_web_search',
+          description: WEB_SEARCH_DESCRIPTION,
+          input: {
+            type: 'object',
+            properties: { query: { type: 'string', maxLength: 200, description: 'The search query. Must be 200 characters or fewer.' } },
+            required: ['query'],
+            additionalProperties: false
+          },
+          async execute(input) {
+            try {
+              const results = await kiroWebSearch(accountManager, (input as { query: string }).query)
+              return { content: formatWebSearchResults(results) }
+            } catch (e) {
+              return { content: `Web search failed: ${e instanceof Error ? e.message : String(e)}` }
             }
           }
-
-          return normalized
-        }
-      },
-      tool: buildTools(config, accountManager)
+        })
+      })
     }
   }
+})
 
-export const KiroOAuthPlugin = createKiroPlugin(KIRO_PROVIDER_ID)
+export const createKiroPlugin = () => KiroOAuthPlugin

@@ -1,4 +1,4 @@
-export { KiroOAuthPlugin, createKiroPlugin } from './src/plugin';
-export { authorizeKiroIDC } from './src/kiro/oauth-idc';
-export type { KiroAuthDetails, KiroAuthMethod, KiroRegion, ManagedAccount } from './src/plugin/types';
-export type { KiroConfig } from './src/plugin/config';
+export { KiroOAuthPlugin as default, KiroOAuthPlugin, createKiroPlugin } from './src/plugin.js'
+export { authorizeKiroIDC } from './src/kiro/oauth-idc.js'
+export type { KiroAuthDetails, KiroAuthMethod, KiroRegion, ManagedAccount } from './src/plugin/types.js'
+export type { KiroConfig } from './src/plugin/config/index.js'
