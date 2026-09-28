@@ -7,6 +7,7 @@ import {
   DEFAULT_CONFIG,
   KiroConfigSchema,
   RegionSchema,
+  TransportSchema,
   type KiroConfig
 } from './schema'
 
@@ -160,7 +161,26 @@ function applyEnvOverrides(config: KiroConfig): KiroConfig {
     enable_log_api_request: parseBooleanEnv(
       env.KIRO_ENABLE_LOG_API_REQUEST,
       config.enable_log_api_request
-    )
+    ),
+
+    transport: env.KIRO_TRANSPORT
+      ? TransportSchema.catch('acp').parse(env.KIRO_TRANSPORT)
+      : config.transport,
+
+    acp_agent: env.KIRO_ACP_AGENT || config.acp_agent,
+    acp_mcp_timeout_minutes: parseNumberEnv(
+      env.KIRO_ACP_MCP_TIMEOUT_MINUTES,
+      config.acp_mcp_timeout_minutes
+    ),
+    acp_model_discovery_timeout_ms: parseNumberEnv(
+      env.KIRO_ACP_MODEL_DISCOVERY_TIMEOUT_MS,
+      config.acp_model_discovery_timeout_ms
+    ),
+    acp_stall_after_ms: parseNumberEnv(env.KIRO_ACP_STALL_AFTER_MS, config.acp_stall_after_ms),
+    acp_stall_live:
+      env.KIRO_ACP_STALL_LIVE === 'reasoning' || env.KIRO_ACP_STALL_LIVE === 'off'
+        ? env.KIRO_ACP_STALL_LIVE
+        : config.acp_stall_live
   }
 }
 

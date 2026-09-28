@@ -7,6 +7,7 @@ import { convertToOpenAI } from './openai-converter.js'
 import { findRealTag } from './stream-parser.js'
 import { createTextDeltaEvents, createThinkingDeltaEvents, stopBlock } from './stream-state.js'
 import { StreamState, THINKING_END_TAG, THINKING_START_TAG, ToolCallState } from './types.js'
+import * as logger from '../logger.js'
 
 interface PendingToolCall {
   toolUseId: string
@@ -16,9 +17,10 @@ interface PendingToolCall {
 
 export async function* transformSdkStream(
   sdkResponse: any,
-  model: string,
-  conversationId: string,
-  toolNameMap?: ToolNameMap
+    model: string,
+    conversationId: string,
+    toolNameMap?: ToolNameMap,
+    requestStartedAt?: number
 ): AsyncGenerator<any> {
   const thinkingRequested = true
 
@@ -52,7 +54,15 @@ export async function* transformSdkStream(
   }
 
   try {
+    let rawEvents = 0
     for await (const event of eventStream) {
+      rawEvents++
+      if (rawEvents === 1 && requestStartedAt !== undefined) {
+        logger.log('Kiro SDK first raw stream event received', {
+          model,
+          latencyMs: Date.now() - requestStartedAt
+        })
+      }
       if (event.reasoningContentEvent) {
         // Native reasoning stream. redactedContent is encrypted by the provider
         // and has no readable form, so only text is surfaced.

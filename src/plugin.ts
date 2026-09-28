@@ -5,9 +5,14 @@ import { IdcAuthMethod } from './core/auth/idc-auth-method.js'
 import { RequestHandler } from './core/request/request-handler.js'
 import { AccountCache } from './infrastructure/database/account-cache.js'
 import { AccountRepository } from './infrastructure/database/account-repository.js'
+import { ACP_PROVIDER_PACKAGE } from './plugin/acp-compatibility-gate.js'
+import { describeAcpAuthStatus, registerAcpAuthIntegration } from './plugin/acp-auth.js'
+import { discoverAcpModelIDs } from './plugin/acp-discovery.js'
+import { registerAcpProviderHooks } from './plugin/acp-provider.js'
 import { AccountManager } from './plugin/accounts.js'
 import { loadConfig } from './plugin/config/index.js'
 import { buildModelRegistry } from './plugin/model-registry.js'
+import { resolveKiroModel } from './plugin/models.js'
 import { formatWebSearchResults, kiroWebSearch } from './plugin/web-search.js'
 import * as logger from './plugin/logger.js'
 
@@ -42,8 +47,12 @@ const WEB_SEARCH_DESCRIPTION = `Search the web using Kiro's built-in search engi
 - ALWAYS cite sources with inline links in the format [description](url).
 - Paraphrase and summarize; do not reproduce more than ~30 consecutive words verbatim from any single source. Preserve factual accuracy while condensing.`
 
-function buildModels(providerID: ReturnType<typeof Provider.ID.make>) {
+function buildModels(providerID: ReturnType<typeof Provider.ID.make>, availableRuntimeModels?: ReadonlySet<string>) {
   return Object.entries(buildModelRegistry()).map(([modelID, legacy]) => {
+    if (availableRuntimeModels !== undefined) {
+      const runtimeModelID = resolveKiroModel(modelID)
+      if (!availableRuntimeModels.has(runtimeModelID)) return undefined
+    }
     const model = legacy as any
     const variants = Object.entries(model.variants ?? {}).map(([id, settings]) => ({
       id: Model.VariantID.make(id),
@@ -58,13 +67,55 @@ function buildModels(providerID: ReturnType<typeof Provider.ID.make>) {
         ? { reasoningField: model.interleaved?.field ?? 'reasoning_content' }
         : undefined
     }
-  })
+  }).filter((model): model is NonNullable<typeof model> => model !== undefined)
 }
 
 export const KiroOAuthPlugin = Plugin.define({
   id: KIRO_PROVIDER_ID,
   async setup(ctx) {
     const config = loadConfig(ctx.location.directory)
+
+    if (config.transport === 'acp') {
+      const { listModels, verifyAuthAsync } = await import('kiro-acp-ai-provider')
+      const authStatus = await verifyAuthAsync()
+      const authState = describeAcpAuthStatus(authStatus)
+      const authCleanup = await registerAcpAuthIntegration(ctx, verifyAuthAsync)
+      const discovery = authStatus.authenticated
+        ? await discoverAcpModelIDs(
+            ctx.location.directory,
+            config.acp_model_discovery_timeout_ms,
+            listModels
+          )
+        : { modelIDs: new Set<string>(), source: 'empty' as const }
+      const providerID = Provider.ID.make(KIRO_PROVIDER_ID)
+      await ctx.provider.transform((editor) => {
+        editor.add({
+          info: {
+            ...Provider.Info.empty(providerID),
+            name: 'Kiro (ACP)',
+            activation: 'enabled',
+            package: ACP_PROVIDER_PACKAGE,
+            settings: {}
+          },
+          models: buildModels(providerID, discovery.modelIDs)
+        })
+      })
+
+      logger.log('Kiro ACP transport enabled', { authState, modelDiscovery: discovery.source })
+      const providerCleanup = await registerAcpProviderHooks(ctx, { directory: ctx.location.directory, config })
+      return async () => {
+        const errors: unknown[] = []
+        for (const cleanup of [providerCleanup, authCleanup]) {
+          try {
+            await cleanup()
+          } catch (error) {
+            errors.push(error)
+          }
+        }
+        if (errors.length > 0) throw new AggregateError(errors, 'Kiro ACP cleanup failed')
+      }
+    }
+
     const showToast: ToastFunction = (message, variant) => logger.log(`Kiro ${variant}: ${message}`)
     const repository = new AccountRepository(new AccountCache(60000))
     const accountManager = await AccountManager.loadFromDisk(config.account_selection_strategy)

@@ -37,9 +37,11 @@ describe('model registry', () => {
     )
   })
 
-  test('does not advertise Kiro GPT tiers, which use a different reasoning contract', () => {
-    for (const id of Object.keys(registry)) {
-      expect(id.startsWith('gpt-')).toBe(false)
+  test('advertises GPT-5.6 tiers with their native reasoning contract', () => {
+    for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+      expect(registry[id].reasoning).toBe(true)
+      expect(registry[id].interleaved).toEqual({ field: 'reasoning_content' })
+      expect(registry[id].variants).toBeDefined()
     }
   })
 
@@ -54,9 +56,9 @@ describe('model registry', () => {
       }
     })
 
-    test('non-thinking models declare neither', () => {
+    test('models without a reasoning contract declare neither', () => {
       for (const [id, model] of Object.entries(registry)) {
-        if (id.endsWith('-thinking')) continue
+        if (id.endsWith('-thinking') || id.startsWith('gpt-5.6-')) continue
         expect(model.reasoning).toBeUndefined()
         expect(model.interleaved).toBeUndefined()
       }

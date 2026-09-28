@@ -162,7 +162,12 @@ export class RequestHandler {
           profileArn: sdkPrep.profileArn
         })
 
+        const sdkRequestStartedAt = Date.now()
         const sdkResponse = await client.send(command)
+        logger.log('Kiro SDK response headers received', {
+          model,
+          latencyMs: Date.now() - sdkRequestStartedAt
+        })
 
         if (apiTimestamp) {
           this.logSdkResponse(sdkPrep, apiTimestamp)
@@ -176,7 +181,8 @@ export class RequestHandler {
           model,
           sdkPrep.conversationId,
           sdkPrep.streaming,
-          sdkPrep.toolNameMap
+          sdkPrep.toolNameMap,
+          sdkRequestStartedAt
         )
       } catch (e: any) {
         const httpStatus = e?.$metadata?.httpStatusCode

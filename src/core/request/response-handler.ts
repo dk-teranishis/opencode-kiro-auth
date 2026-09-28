@@ -5,6 +5,8 @@ import { transformSdkStream } from '../../plugin/streaming/sdk-stream-transforme
 import type { ToolNameMap } from '../../plugin/types.js'
 import * as logger from '../../plugin/logger.js'
 
+const STREAM_KEEPALIVE_MS = 15_000
+
 interface AccumulatedToolCall {
   toolUseId: string
   name?: string
@@ -30,10 +32,11 @@ export class ResponseHandler {
     model: string,
     conversationId: string,
     streaming: boolean,
-    toolNameMap?: ToolNameMap
+    toolNameMap?: ToolNameMap,
+    requestStartedAt?: number
   ): Promise<Response> {
     if (streaming) {
-      return this.handleSdkStreaming(sdkResponse, model, conversationId, toolNameMap)
+      return this.handleSdkStreaming(sdkResponse, model, conversationId, toolNameMap, requestStartedAt)
     }
     return this.handleSdkNonStreaming(sdkResponse, model, conversationId, toolNameMap)
   }
@@ -51,24 +54,55 @@ export class ResponseHandler {
     )
   }
 
-  private createStreamingResponse(stream: AsyncIterable<any>, model: string, source: string): Response {
+  private createStreamingResponse(
+    stream: AsyncIterable<any>,
+    model: string,
+    source: string,
+    requestStartedAt?: number
+  ): Response {
     return new Response(
       new ReadableStream({
         async start(c) {
+          const encoder = new TextEncoder()
+          const keepalive = setInterval(() => {
+            try {
+              // SSE comments are ignored by OpenAI-compatible consumers while
+              // keeping the OpenCode response stream active during model silence.
+              c.enqueue(encoder.encode(': keepalive\n\n'))
+            } catch {
+              // The consumer has already closed the response stream.
+            }
+          }, STREAM_KEEPALIVE_MS)
           try {
             let chunks = 0
             let finished = false
             for await (const e of stream) {
               chunks++
+              if (chunks === 1 && requestStartedAt !== undefined) {
+                logger.log(`Kiro ${source} first converted stream chunk received`, {
+                  model,
+                  latencyMs: Date.now() - requestStartedAt
+                })
+              }
               finished ||= Boolean(e.choices?.[0]?.finish_reason)
-              c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`))
+              c.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`))
             }
-            logger.log(`Kiro ${source} stream completed`, { model, chunks, finished })
-            c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'))
+            logger.log(`Kiro ${source} stream completed`, {
+              model,
+              chunks,
+              finished,
+              ...(requestStartedAt === undefined ? {} : { durationMs: Date.now() - requestStartedAt })
+            })
+            c.enqueue(encoder.encode('data: [DONE]\n\n'))
             c.close()
           } catch (err) {
-            logger.error(`Kiro ${source} stream failed`, err instanceof Error ? err : new Error(String(err)))
+            logger.error(
+              `Kiro ${source} stream failed`,
+              err instanceof Error ? err : new Error(String(err))
+            )
             c.error(err)
+          } finally {
+            clearInterval(keepalive)
           }
         }
       }),
@@ -80,12 +114,14 @@ export class ResponseHandler {
     sdkResponse: any,
     model: string,
     conversationId: string,
-    toolNameMap?: ToolNameMap
+    toolNameMap?: ToolNameMap,
+    requestStartedAt?: number
   ): Promise<Response> {
     return this.createStreamingResponse(
-      transformSdkStream(sdkResponse, model, conversationId, toolNameMap),
+      transformSdkStream(sdkResponse, model, conversationId, toolNameMap, requestStartedAt),
       model,
-      'SDK'
+      'SDK',
+      requestStartedAt
     )
   }
 

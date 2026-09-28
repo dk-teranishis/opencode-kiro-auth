@@ -14,6 +14,9 @@ export type AccountSelectionStrategy = z.infer<typeof AccountSelectionStrategySc
 export const EffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max'])
 export type Effort = z.infer<typeof EffortSchema>
 
+export const TransportSchema = z.enum(['sdk', 'acp'])
+export type Transport = z.infer<typeof TransportSchema>
+
 export const RegionSchema = z.enum([
   'us-east-1',
   'us-east-2',
@@ -83,6 +86,16 @@ export const KiroConfigSchema = z.object({
   auto_sync_kiro_cli: z.boolean().default(true),
   enable_log_api_request: z.boolean().default(false),
 
+  // `acp` is the default Kiro CLI route. `sdk` retains the direct
+  // CodeWhisperer Streaming SDK route as an explicit compatibility option.
+  // Only one transport is registered at a time.
+  transport: TransportSchema.default('acp'),
+  acp_agent: z.string().trim().min(1).max(128).default('opencode'),
+  acp_mcp_timeout_minutes: z.number().int().min(1).max(60).default(30),
+  acp_model_discovery_timeout_ms: z.number().int().min(1000).max(60000).default(15000),
+  acp_stall_after_ms: z.number().int().min(0).max(300000).default(10000),
+  acp_stall_live: z.enum(['off', 'reasoning']).default('off'),
+
   /**
    * Default effort level for thinking models. Controls reasoning depth.
    * When set, this overrides the automatic budget-based mapping.
@@ -121,6 +134,12 @@ export const DEFAULT_CONFIG: KiroConfig = {
   usage_tracking_enabled: true,
   auto_sync_kiro_cli: true,
   enable_log_api_request: false,
+  transport: 'acp',
+  acp_agent: 'opencode',
+  acp_mcp_timeout_minutes: 30,
+  acp_model_discovery_timeout_ms: 15000,
+  acp_stall_after_ms: 10000,
+  acp_stall_live: 'off',
   auto_effort_mapping: true,
   web_search_enabled: true
 }

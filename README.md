@@ -92,13 +92,61 @@ reachable from a budget alone:
 get a five-variant ladder; the rest get four, and a budget in the `xhigh` band is
 clamped to `max`.
 
-Kiro's GPT-5.6 tiers are not advertised. They configure reasoning through
-`reasoning.effort` / `reasoning.mode` instead of `output_config.effort`, so they
-need a separate request path.
+Kiro's GPT-5.6 tiers are advertised with their native reasoning contract. They
+use `reasoning.effort` / `reasoning.mode` rather than `output_config.effort`, so
+their effort mapping is handled separately from the Claude thinking variants.
 
 Use `~/.config/opencode/kiro.json` for plugin-wide behavior such as auth sync,
 account selection, retry limits, and `auto_effort_mapping`. A top-level `effort`
 setting is a global override for all supported models, not a per-model setting.
+
+### ACP transport (default)
+
+The default transport is Kiro CLI / ACP. It uses the locally authenticated
+`kiro-cli` route and does not import, copy, or refresh credentials through this
+plugin's SDK account database. Existing configurations without a `transport`
+field therefore use ACP after the plugin is reloaded.
+
+To use the direct CodeWhisperer Streaming SDK compatibility route instead, set
+`transport` to `sdk` in `~/.config/opencode/kiro.json` or a project-local
+`.opencode/kiro.json` (or set `KIRO_TRANSPORT=sdk` for one process):
+
+```json
+{
+  "transport": "sdk"
+}
+```
+
+ACP configuration can be adjusted explicitly when needed:
+
+```json
+{
+  "transport": "acp",
+  "acp_agent": "opencode",
+  "acp_mcp_timeout_minutes": 30,
+  "acp_model_discovery_timeout_ms": 15000,
+  "acp_stall_after_ms": 10000,
+  "acp_stall_live": "off"
+}
+```
+
+In ACP mode the plugin does not register the SDK HTTP interception, SDK
+authentication, or `kiro_web_search`; only the ACP provider is active. The
+provider is created lazily when OpenCode invokes a model and stopped when the
+plugin unloads.
+
+At startup ACP checks the CLI state without copying credentials. It only
+advertises models returned by the CLI's runtime discovery. If `kiro-cli` is not
+installed, not logged in, returns no models, or discovery exceeds the configured
+timeout, no ACP model is selectable. Use `opencode auth login` → **Kiro CLI
+Login** (or run `kiro-cli login`) and restart OpenCode after resolving the CLI
+state. The login integration stores only a non-secret presence record; `kiro-cli`
+continues to own credentials and refresh.
+
+ACP tool permissions are intentionally denied in this phase (`trustAllTools` is
+false). Do not use ACP for tool-using workflows until the OpenCode-to-ACP
+permission mapping is evaluated. Return to the direct SDK compatibility route by
+setting `"transport": "sdk"` and restarting OpenCode.
 
 ## Setup
 
